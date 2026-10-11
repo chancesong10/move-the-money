@@ -6,7 +6,7 @@ All amounts are represented through a whole number equaling the number of cents.
 
 problems: 
 
-currently in the scope of what I have to do, i think this is fine but for future purposes, if I include other currencies like japanese yen, they do not have decimals. Or some other currencies have 3 decimal places. In this case I would probably have a hashmap with all currencies I want to support and their respective decimal places and then for every operation invloving these decimals I would replace it with a global variable that sets it to the currency of the user. Then for transfers I would reject transfers between different currencies until I can get the proper exchange values down (through a live currency api?)
+currently in the scope of what I have to do, i think this is fine but for future purposes, if I include other currencies like japanese yen, they do not have decimals. Or some other currencies have 3 decimal places. In this case I would probably have a hashmap with all currencies I want to support and their respective decimal places and then for every operation invloving these decimals I would replace it with a global variable that sets it to the currency of the user. Then for transfers I would reject transfers between different currencies until I can get the proper exchange values down (through a live currency api)
 
 another problem is that I can only add and subtract which is what the assigment wants but if i implement anything like intrest where money grows mulitplicatively then there would be wierd rounding issues that ill need to cover. Or like splitting 10 dollars 3 ways, who would get the remaining cent etc. 
 
@@ -17,4 +17,65 @@ a problem that exists in the scope of what I have to do though is a float return
  currently this should problem should be fine since I do not have mutiplication or division.
 
 
-2. next few prompts to implemnt the features of having an account.
+2. next few prompts to implemnt the features of having an account and the transfering.
+
+What I asked for: opening an account, getting the balance and history, then transfers. Transfers follow my plan: claim the idempotency key, lock both accounts, check the balance, move the money and write the ledger entries, all in one database transaction.
+
+What it built: Opening an account writes the account and its opening ledger entry in one transaction, so an account's balance always matches the sum of its history. Tests run against a real Postgres database (a separate money_test), emptied before every test. No mocks, since mocks can't test locks or transactions.
+
+Where the AI was wrong:
+
+My plan deadlocked. The plan (drafted with AI in another chat) said to lock accounts with SELECT ... FOR UPDATE. Before writing any transfer code, Claude ran two competing transfers against the real database and got deadlock detected. Inserting the transfer row first makes Postgres put a light lock on both accounts to check the foreign keys, and FOR UPDATE conflicts with it. So two transfers each wait for the other, even when locking the lowest ID first. FOR NO KEY UPDATE fixed it with 0 failures. It still stops two transfers changing the same balance at once, but doesn't conflict with the foreign-key lock.
+
+A concurrency test that isn't really concurrent. Go's database pool only opens about 4 connections by default. With 20 goroutines, most would just wait in line in Go instead of competing inside Postgres, and the test would pass while proving very little. The pool is now set to 50.
+
+A safety net can hide a missing lock. I had a second Claude chat review the work. It pointed out that the database's CHECK (balance >= 0) would still stop overdrafts even with the lock removed, so a test that only checks "the balance isn't negative" would pass without the lock. The tests therefore require every failed transfer to be a clean "insufficient funds" error, not a database constraint error.
+
+The test helper could wipe the wrong database. The same review found that the test setup drops the whole schema of whatever database it's pointed at, including my dev database if I mistyped the URL. It now refuses any database whose name doesn't end in _test.
+
+overall problems I didnt mention before:
+    
+Claude initially acted without asking. The first three commits were made by Claude, within about 2 minutes, before I told it to stop committing. One commit message also claims the ledger is "append-only", but nothing in the database enforces that, only the code and a test do.
+
+What worked:
+
+My plan required every concurrency test to fail if the lock is removed, so I had Claude temporarily break the code in different ways and check that tests failed:
+
+No lock: all 3 concurrency tests failed.
+No lock and no CHECK: all 20 transfers succeeded against an account holding $100, so the balance went negative. Rule 1 actually broken.
+FOR UPDATE (my original plan): almost every concurrent transfer failed with a deadlock.
+No duplicate-key handling: all 3 idempotency tests failed.
+
+Things i noticed:
+
+I noticed when asking the AI what happends to failed transfers it replied with that they are never recorded. Since it followed the rules set in the md instructions this makes sense however for an actual banking software i feel like i'd need to record failed transactions like insuffcient funds etc. When i asked claude about this, they agreed and gave me the pros and cons for both.
+
+------------------------------------------------ 
+Claude generated
+Pros of not recording failures
+- It's simpler. One transaction, any error rolls back, and there's no status column or "rejected" state to handle.
+- The transfers table only holds transfers that actually moved money.
+- A retry after money arrives just works, which can be what the user wants if the failure was temporary.
+
+Cons
+- A stale retry can move money the user was told failed. For example:
+  a. A request fails with insufficient funds,
+  b. An automatic retry of that same request is still in flight, or queued.
+  c. Money arrives in the account.
+  d. The retry lands, succeeds, and $50 leaves an account whose owner thinks the transfer was rejected.
+
+  "Networks retry" is the exact scenario the brief warns about.
+- The same key gives different answers over ted key should "return the original result", and right now it doesn't for failures.
+- There's no record of rejected attempts. Reaor auditing and fraud checks.
+---------------------------------------------------
+
+When testing this, the reports show that retry: replayed=false err=<nil> meaning the retry succeeded and moved the money despite the transfer "failing". The new implmenetation spends a rejected key for good. Then to try again, the client must send a new key. A cost of having this may be the table filling up with failed transfers making rows that wouldnt normally exist. (storage cost).
+
+
+3. HTTP API and demo
+
+I asked claude to create a json api for the bank code as well as a small demo showing simple transfers failing etc. 
+
+it built four enpoints (open account, get balance, get history, transfer). Insufficinet funds returns 422, with the rejected transfer in the body. History shows the transfer of who the money came from or went to. It also created a situation which tests most cases however it did not cover the most important one of what happens when mutiple request happen at once and competeing for the same money at the same time so I had claude add onto the tests to include that.
+
+When looking through the code I saw a recorded number for the INTMAX which was around 92 quadrillion, unless someone reaches that number and then overflows, there should be no errors and seeing how the richest man alive has "only" 1 trillion, it is safe to assume no problems.
