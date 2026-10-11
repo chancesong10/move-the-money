@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -122,6 +123,24 @@ func TestOpenAccountRejectsNegativeBalance(t *testing.T) {
 	if n != 0 {
 		t.Errorf("%d accounts created, want 0", n)
 	}
+}
+
+func TestLedgerIsAppendOnly(t *testing.T) {
+	b := newBank(t)
+	ctx := context.Background()
+	if _, err := b.OpenAccount(ctx, 10_000); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stmt := range []string{
+		`UPDATE ledger_entries SET amount_cents = 1`,
+		`DELETE FROM ledger_entries`,
+	} {
+		if _, err := testPool.Exec(ctx, stmt); err == nil || !strings.Contains(err.Error(), "append-only") {
+			t.Errorf("%s: err = %v, want the append-only trigger to reject it", stmt, err)
+		}
+	}
+	assertLedgerMatchesBalances(t)
 }
 
 func TestUnknownAccount(t *testing.T) {
