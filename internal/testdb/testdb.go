@@ -16,15 +16,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Tests use their own database (money_test), never the dev one, because
-// every test truncates all tables.
+// Tests use their own databases, never the dev one, because every test
+// truncates all tables.
 const defaultURL = "postgres://money:money@localhost:5432/money_test"
 
-// Setup creates the test database if needed, rebuilds the schema from
-// migrations/ (so tests always run against the current SQL, unlike the
-// docker init scripts which only run once), and returns a connection pool.
-// Call it once, from TestMain.
-func Setup(ctx context.Context) (*pgxpool.Pool, error) {
+// Setup creates a test database for one package (e.g. name "bank" gives
+// money_bank_test), rebuilds its schema from migrations/ (so tests always run
+// against the current SQL, unlike the docker init scripts which only run
+// once), and returns a connection pool. Call it once, from TestMain.
+//
+// One database per package because go test ./... runs packages in parallel,
+// and each package's setup drops the schema: a shared database would let one
+// package wipe another's tables mid-test.
+func Setup(ctx context.Context, name string) (*pgxpool.Pool, error) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		url = defaultURL
@@ -35,9 +39,11 @@ func Setup(ctx context.Context) (*pgxpool.Pool, error) {
 	}
 	// migrate() drops the whole schema. Refuse to run against anything that
 	// isn't obviously a test database, so a mistyped URL can't wipe dev data.
-	if !strings.HasSuffix(cfg.ConnConfig.Database, "_test") {
-		return nil, fmt.Errorf("refusing to use database %q: test database names must end in _test", cfg.ConnConfig.Database)
+	base := cfg.ConnConfig.Database
+	if !strings.HasSuffix(base, "_test") {
+		return nil, fmt.Errorf("refusing to use database %q: test database names must end in _test", base)
 	}
+	cfg.ConnConfig.Database = strings.TrimSuffix(base, "_test") + "_" + name + "_test"
 	// The default pool size is max(4, number of CPUs). If a concurrency test
 	// starts 20 goroutines but only 4 can get a connection, the rest queue in
 	// Go instead of competing inside Postgres, and the test proves much less

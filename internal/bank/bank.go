@@ -24,10 +24,11 @@ type Account struct {
 
 // Entry is one line of an account's history. Negative = money out, positive = in.
 type Entry struct {
-	ID          int64
-	TransferID  *int64 // nil for the opening-balance entry
-	AmountCents int64
-	CreatedAt   time.Time
+	ID                    int64
+	TransferID            *int64 // nil for the opening-balance entry
+	CounterpartyAccountID *int64 // the other account in the transfer; nil for opening balance
+	AmountCents           int64
+	CreatedAt             time.Time
 }
 
 type Bank struct {
@@ -93,9 +94,17 @@ func (b *Bank) History(ctx context.Context, accountID int64) ([]Entry, error) {
 		return nil, err
 	}
 
+	// The counterparty is whichever side of the transfer isn't this account.
+	// Opening-balance entries have no transfer, so the join yields NULL.
 	rows, err := b.pool.Query(ctx,
-		`SELECT id, transfer_id, amount_cents, created_at
-		 FROM ledger_entries WHERE account_id = $1 ORDER BY id`,
+		`SELECT e.id, e.transfer_id,
+		        CASE WHEN t.from_account_id = e.account_id THEN t.to_account_id
+		             ELSE t.from_account_id END,
+		        e.amount_cents, e.created_at
+		 FROM ledger_entries e
+		 LEFT JOIN transfers t ON t.id = e.transfer_id
+		 WHERE e.account_id = $1
+		 ORDER BY e.id`,
 		accountID,
 	)
 	if err != nil {
@@ -103,7 +112,7 @@ func (b *Bank) History(ctx context.Context, accountID int64) ([]Entry, error) {
 	}
 	entries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Entry, error) {
 		var e Entry
-		err := row.Scan(&e.ID, &e.TransferID, &e.AmountCents, &e.CreatedAt)
+		err := row.Scan(&e.ID, &e.TransferID, &e.CounterpartyAccountID, &e.AmountCents, &e.CreatedAt)
 		return e, err
 	})
 	if err != nil {

@@ -136,6 +136,19 @@ func TestTransfer(t *testing.T) {
 		history[1].TransferID == nil || *history[1].TransferID != tr.ID {
 		t.Errorf("alice history = %+v, want opening entry then -3000 for transfer %d", history, tr.ID)
 	}
+	if history[0].CounterpartyAccountID != nil {
+		t.Errorf("opening entry counterparty = %v, want nil", *history[0].CounterpartyAccountID)
+	}
+	if cp := history[1].CounterpartyAccountID; cp == nil || *cp != bob.ID {
+		t.Errorf("alice's transfer entry counterparty = %v, want bob (%d)", cp, bob.ID)
+	}
+	bobHistory, err := b.History(ctx, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp := bobHistory[1].CounterpartyAccountID; cp == nil || *cp != alice.ID {
+		t.Errorf("bob's transfer entry counterparty = %v, want alice (%d)", cp, alice.ID)
+	}
 	assertLedgerMatchesBalances(t)
 }
 
@@ -262,8 +275,8 @@ func TestTransferIsAllOrNothing(t *testing.T) {
 	whale := mustOpen(t, b, math.MaxInt64-5)
 
 	_, _, err := b.Transfer(context.Background(), TransferRequest{"k1", alice.ID, whale.ID, 10})
-	if err == nil {
-		t.Fatal("expected the credit to overflow and the transfer to fail")
+	if !errors.Is(err, ErrBalanceOverflow) {
+		t.Fatalf("err = %v, want ErrBalanceOverflow", err)
 	}
 	if got := balanceOf(t, b, alice.ID); got != 10_000 {
 		t.Errorf("alice = %d, want 10000: money left her account without arriving", got)

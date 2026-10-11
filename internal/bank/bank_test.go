@@ -16,7 +16,7 @@ import (
 var testPool *pgxpool.Pool
 
 func TestMain(m *testing.M) {
-	pool, err := testdb.Setup(context.Background())
+	pool, err := testdb.Setup(context.Background(), "bank")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "test database setup failed:", err)
 		os.Exit(1)

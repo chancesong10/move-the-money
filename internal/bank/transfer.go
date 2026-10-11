@@ -18,6 +18,7 @@ var (
 	ErrSameAccount         = errors.New("cannot transfer to the same account")
 	ErrInvalidKey          = errors.New("idempotency key must be 1-255 characters")
 	ErrIdempotencyConflict = errors.New("idempotency key already used for a different transfer")
+	ErrBalanceOverflow     = errors.New("receiver's balance would exceed the maximum")
 )
 
 const maxKeyLength = 255 // matches the CHECK in migrations/002
@@ -168,6 +169,12 @@ func (b *Bank) Transfer(ctx context.Context, req TransferRequest) (t Transfer, r
 			`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id = $2`,
 			req.AmountCents, req.ToAccountID,
 		); err != nil {
+			// Unlike insufficient funds, this isn't recorded as a rejection:
+			// the debit above has already run, so the whole transaction must
+			// roll back. Only reachable near $92 quadrillion.
+			if isOutOfRange(err) {
+				return ErrBalanceOverflow
+			}
 			return err
 		}
 		_, err = tx.Exec(ctx,
@@ -222,6 +229,15 @@ func transferByKey(ctx context.Context, tx pgx.Tx, key string) (Transfer, error)
 }
 
 func isForeignKeyViolation(err error) bool {
+	return hasPgCode(err, "23503")
+}
+
+// isOutOfRange reports a BIGINT overflow (numeric_value_out_of_range).
+func isOutOfRange(err error) bool {
+	return hasPgCode(err, "22003")
+}
+
+func hasPgCode(err error, code string) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+	return errors.As(err, &pgErr) && pgErr.Code == code
 }
