@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -16,7 +17,7 @@ import (
 var (
 	ErrInsufficientFunds   = errors.New("insufficient funds")
 	ErrSameAccount         = errors.New("cannot transfer to the same account")
-	ErrInvalidKey          = errors.New("idempotency key must be 1-255 characters")
+	ErrInvalidKey          = errors.New("idempotency key must be 1-255 characters of valid UTF-8 text")
 	ErrIdempotencyConflict = errors.New("idempotency key already used for a different transfer")
 	ErrBalanceOverflow     = errors.New("receiver's balance would exceed the maximum")
 )
@@ -206,6 +207,11 @@ func rejectionError(reason string) error {
 
 func validateTransfer(req TransferRequest) error {
 	if n := utf8.RuneCountInString(req.IdempotencyKey); n == 0 || n > maxKeyLength {
+		return ErrInvalidKey
+	}
+	// Postgres TEXT rejects invalid UTF-8 and NUL bytes; without this check
+	// such a key reaches the INSERT and comes back as a 500, not a 400.
+	if !utf8.ValidString(req.IdempotencyKey) || strings.ContainsRune(req.IdempotencyKey, 0) {
 		return ErrInvalidKey
 	}
 	if req.AmountCents <= 0 {

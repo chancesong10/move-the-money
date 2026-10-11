@@ -245,6 +245,8 @@ func TestTransferValidation(t *testing.T) {
 		{"same account", TransferRequest{"k", alice.ID, alice.ID, 100}, ErrSameAccount},
 		{"empty key", TransferRequest{"", alice.ID, bob.ID, 100}, ErrInvalidKey},
 		{"key too long", TransferRequest{strings.Repeat("x", 256), alice.ID, bob.ID, 100}, ErrInvalidKey},
+		{"key not valid UTF-8", TransferRequest{"\xff\xfe", alice.ID, bob.ID, 100}, ErrInvalidKey},
+		{"key contains NUL", TransferRequest{"a\x00b", alice.ID, bob.ID, 100}, ErrInvalidKey},
 		{"unknown receiver", TransferRequest{"k", alice.ID, 999, 100}, ErrAccountNotFound},
 		{"unknown sender", TransferRequest{"k", 999, bob.ID, 100}, ErrAccountNotFound},
 	}

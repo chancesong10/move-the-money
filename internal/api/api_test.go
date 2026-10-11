@@ -219,6 +219,7 @@ func TestBadRequests(t *testing.T) {
 		{"two JSON objects", "POST", "/accounts", `{"opening_balance": "1"}{"opening_balance": "2"}`, "", 400, "invalid_request"},
 		{"missing idempotency key", "POST", "/transfers", transferBody(alice, bob, "1.00"), "", 400, "invalid_idempotency_key"},
 		{"key too long", "POST", "/transfers", transferBody(alice, bob, "1.00"), strings.Repeat("k", 256), 400, "invalid_idempotency_key"},
+		{"key not valid UTF-8", "POST", "/transfers", transferBody(alice, bob, "1.00"), "\xff\xfe", 400, "invalid_idempotency_key"},
 		{"missing amount", "POST", "/transfers", fmt.Sprintf(`{"from_account_id": %d, "to_account_id": %d}`, alice, bob), "k1", 400, "invalid_request"},
 		{"fractional account id", "POST", "/transfers", `{"from_account_id": 1.5, "to_account_id": 2, "amount": "1"}`, "k2", 400, "invalid_request"},
 		{"zero amount", "POST", "/transfers", transferBody(alice, bob, "0.00"), "k3", 400, "invalid_amount"},
