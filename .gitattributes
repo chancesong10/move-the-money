@@ -1,0 +1,2 @@
+# Keep LF everywhere: gofmt expects it, and the SQL is run inside a Linux container.
+* text=auto eol=lf
