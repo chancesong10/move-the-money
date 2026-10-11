@@ -55,6 +55,17 @@ func countRows(t *testing.T, table string) int {
 	return n
 }
 
+func countTransfers(t *testing.T, status string) int {
+	t.Helper()
+	var n int
+	err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM transfers WHERE status = $1`, status).Scan(&n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func assertNoNegativeBalances(t *testing.T) {
 	t.Helper()
 	var n int
@@ -141,27 +152,67 @@ func TestTransferEntireBalance(t *testing.T) {
 	}
 }
 
-func TestTransferInsufficientFunds(t *testing.T) {
+func TestTransferInsufficientFundsIsRecordedAsRejected(t *testing.T) {
 	b := newBank(t)
 	ctx := context.Background()
 	alice := mustOpen(t, b, 1_000)
 	bob := mustOpen(t, b, 0)
 
-	_, _, err := b.Transfer(ctx, TransferRequest{"k1", alice.ID, bob.ID, 1_001})
+	tr, replayed, err := b.Transfer(ctx, TransferRequest{"k1", alice.ID, bob.ID, 1_001})
 	if !errors.Is(err, ErrInsufficientFunds) {
 		t.Fatalf("err = %v, want ErrInsufficientFunds", err)
+	}
+	if replayed || tr.ID == 0 || tr.Status != StatusRejected || tr.FailureReason != "insufficient_funds" {
+		t.Errorf("got %+v replayed=%v, want a fresh rejected transfer with reason insufficient_funds", tr, replayed)
 	}
 	if got := balanceOf(t, b, alice.ID); got != 1_000 {
 		t.Errorf("alice = %d, want 1000 (unchanged)", got)
 	}
-	if n := countRows(t, "transfers"); n != 0 {
-		t.Errorf("%d transfer rows after a failed transfer, want 0", n)
+	if n := countTransfers(t, StatusRejected); n != 1 {
+		t.Errorf("%d rejected transfer rows, want 1 (the attempt is kept for audit)", n)
+	}
+	if n := countRows(t, "ledger_entries"); n != 1 {
+		t.Errorf("%d ledger entries, want 1 (alice's opening only; rejections move no money)", n)
+	}
+	assertLedgerMatchesBalances(t)
+}
+
+// The stale-retry scenario: a transfer is rejected, money then arrives, and
+// a retry of the original request (same key) lands afterwards. The retry must
+// get the original rejection back, not quietly move money the user was told
+// had failed.
+func TestRetryOfRejectedTransferStaysRejected(t *testing.T) {
+	b := newBank(t)
+	ctx := context.Background()
+	alice := mustOpen(t, b, 1_000)
+	bob := mustOpen(t, b, 0)
+	carol := mustOpen(t, b, 10_000)
+	req := TransferRequest{"pay-bob", alice.ID, bob.ID, 5_000}
+
+	first, _, err := b.Transfer(ctx, req)
+	if !errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("first attempt: err = %v, want ErrInsufficientFunds", err)
 	}
 
-	// The failed attempt was rolled back with its key, so the same key can be
-	// retried and is evaluated afresh. This is a deliberate design choice.
-	if _, replayed, err := b.Transfer(ctx, TransferRequest{"k1", alice.ID, bob.ID, 1_000}); err != nil || replayed {
-		t.Fatalf("retry after failure: replayed=%v err=%v, want a fresh successful transfer", replayed, err)
+	// Money arrives: alice now has enough.
+	if _, _, err := b.Transfer(ctx, TransferRequest{"top-up", carol.ID, alice.ID, 9_000}); err != nil {
+		t.Fatal(err)
+	}
+
+	retry, replayed, err := b.Transfer(ctx, req)
+	if !errors.Is(err, ErrInsufficientFunds) || !replayed {
+		t.Fatalf("retry: replayed=%v err=%v, want the original rejection replayed", replayed, err)
+	}
+	if retry.ID != first.ID || retry.Status != StatusRejected {
+		t.Errorf("retry returned %+v, want original rejected transfer %d", retry, first.ID)
+	}
+	if got := balanceOf(t, b, alice.ID); got != 10_000 {
+		t.Errorf("alice = %d, want 10000: the stale retry moved money", got)
+	}
+
+	// A genuinely new request (new key) is evaluated on its own and succeeds.
+	if _, _, err := b.Transfer(ctx, TransferRequest{"pay-bob-again", alice.ID, bob.ID, 5_000}); err != nil {
+		t.Errorf("new key after top-up: %v, want success", err)
 	}
 	assertLedgerMatchesBalances(t)
 }
@@ -329,6 +380,13 @@ func TestConcurrentTransfersCannotOverdraw(t *testing.T) {
 			t.Errorf("round %d: total money changed from %d to %d", round, before, after)
 		}
 	}
+	// Every attempt is on record: 10 completed and 10 rejected per round.
+	if n := countTransfers(t, StatusCompleted); n != rounds*opening/amount {
+		t.Errorf("%d completed transfers, want %d", n, rounds*opening/amount)
+	}
+	if n := countTransfers(t, StatusRejected); n != rounds*(goroutines-opening/amount) {
+		t.Errorf("%d rejected transfers, want %d", n, rounds*(goroutines-opening/amount))
+	}
 	assertNoNegativeBalances(t)
 	assertLedgerMatchesBalances(t)
 }
@@ -402,6 +460,42 @@ func TestConcurrentDuplicateSubmissionsAreAppliedOnce(t *testing.T) {
 	assertLedgerMatchesBalances(t)
 }
 
+// Same as above, but the request is one that gets rejected. Every copy must
+// see the same rejection: the waiting copies block on the first one's key,
+// then replay its committed 'rejected' outcome.
+func TestConcurrentDuplicatesOfRejectedTransferAllSeeRejection(t *testing.T) {
+	const copies = 10
+	b := newBank(t)
+	ctx := context.Background()
+	alice := mustOpen(t, b, 1_000)
+	bob := mustOpen(t, b, 0)
+	req := TransferRequest{"too-much", alice.ID, bob.ID, 5_000}
+
+	results := runConcurrently(copies, func(int) transferResult {
+		tr, replayed, err := b.Transfer(ctx, req)
+		return transferResult{tr, replayed, err}
+	})
+
+	fresh := 0
+	for _, r := range results {
+		if !errors.Is(r.err, ErrInsufficientFunds) {
+			t.Errorf("err = %v, want ErrInsufficientFunds", r.err)
+		}
+		if !r.replayed {
+			fresh++
+		}
+	}
+	if fresh != 1 {
+		t.Errorf("%d submissions evaluated, want exactly 1 (the rest replayed)", fresh)
+	}
+	if n := countRows(t, "transfers"); n != 1 {
+		t.Errorf("%d transfer rows, want 1", n)
+	}
+	if got := balanceOf(t, b, alice.ID); got != 1_000 {
+		t.Errorf("alice = %d, want 1000", got)
+	}
+}
+
 // Rule 4 under load: many random transfers between a few accounts, using
 // amounts that a float would get wrong (0.29, 1.15, 4.35...). Some will fail
 // for insufficient funds, which is fine. Not one cent may be created or lost.
@@ -446,8 +540,11 @@ func TestConcurrentRandomTransfersConserveMoney(t *testing.T) {
 	if after := totalMoney(t); after != before {
 		t.Errorf("total money changed from %d to %d", before, after)
 	}
-	if n := countRows(t, "transfers"); n != succeeded {
-		t.Errorf("%d transfer rows but %d successes", n, succeeded)
+	if n := countTransfers(t, StatusCompleted); n != succeeded {
+		t.Errorf("%d completed transfer rows but %d successes", n, succeeded)
+	}
+	if n := countTransfers(t, StatusRejected); n != transfers-succeeded {
+		t.Errorf("%d rejected transfer rows but %d rejections", n, transfers-succeeded)
 	}
 	if n := countRows(t, "ledger_entries"); n != len(ids)+2*succeeded {
 		t.Errorf("%d ledger entries, want %d (one opening each + two per transfer)", n, len(ids)+2*succeeded)

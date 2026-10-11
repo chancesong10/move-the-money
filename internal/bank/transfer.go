@@ -22,6 +22,14 @@ var (
 
 const maxKeyLength = 255 // matches the CHECK in migrations/002
 
+// Transfer statuses and failure reasons, as stored in the transfers table.
+const (
+	StatusCompleted = "completed"
+	StatusRejected  = "rejected"
+
+	reasonInsufficientFunds = "insufficient_funds"
+)
+
 type TransferRequest struct {
 	IdempotencyKey string
 	FromAccountID  int64
@@ -35,19 +43,27 @@ type Transfer struct {
 	FromAccountID  int64
 	ToAccountID    int64
 	AmountCents    int64
+	Status         string // StatusCompleted or StatusRejected
+	FailureReason  string // empty unless rejected
 	CreatedAt      time.Time
 }
 
 // Transfer moves money between two accounts in a single database transaction:
-// either everything below happens, or nothing does.
+// either all of the money movement happens, or none of it does.
 //
-// If the idempotency key was already used for an identical transfer, nothing
-// is moved and the original transfer is returned with replayed = true. If it
-// was used for a different transfer, ErrIdempotencyConflict is returned.
+// If the sender can't cover the amount, the attempt is still recorded, as
+// rejected, and Transfer returns that record together with
+// ErrInsufficientFunds. Callers must check the error before treating the
+// transfer as completed.
 //
-// A transfer that fails (e.g. insufficient funds) is rolled back entirely,
-// including its idempotency key, so retrying the same key later is evaluated
-// afresh rather than replaying the failure.
+// If the idempotency key was already used for an identical request, nothing
+// new happens: the original outcome is returned with replayed = true. That
+// includes a rejection, so a stale retry can't succeed later just because
+// money has since arrived. If the key was used for a different request,
+// ErrIdempotencyConflict is returned.
+//
+// Invalid requests (bad amount, bad key, same account, unknown account) are
+// not recorded: they never became a transfer attempt.
 func (b *Bank) Transfer(ctx context.Context, req TransferRequest) (t Transfer, replayed bool, err error) {
 	if err := validateTransfer(req); err != nil {
 		return Transfer{}, false, err
@@ -59,18 +75,23 @@ func (b *Bank) Transfer(ctx context.Context, req TransferRequest) (t Transfer, r
 		// same key race, Postgres makes the second INSERT wait until the first
 		// transaction finishes, then either skips it (first committed) or lets
 		// it through (first rolled back). There is no check-then-insert gap.
+		//
+		// The row starts as 'completed' and is flipped to 'rejected' below if
+		// the balance check fails. Nobody outside this transaction can see the
+		// row until it commits, so nobody ever sees the wrong status.
 		t = Transfer{
 			IdempotencyKey: req.IdempotencyKey,
 			FromAccountID:  req.FromAccountID,
 			ToAccountID:    req.ToAccountID,
 			AmountCents:    req.AmountCents,
+			Status:         StatusCompleted,
 		}
 		err := tx.QueryRow(ctx,
-			`INSERT INTO transfers (idempotency_key, from_account_id, to_account_id, amount_cents)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO transfers (idempotency_key, from_account_id, to_account_id, amount_cents, status)
+			 VALUES ($1, $2, $3, $4, $5)
 			 ON CONFLICT (idempotency_key) DO NOTHING
 			 RETURNING id, created_at`,
-			req.IdempotencyKey, req.FromAccountID, req.ToAccountID, req.AmountCents,
+			req.IdempotencyKey, req.FromAccountID, req.ToAccountID, req.AmountCents, StatusCompleted,
 		).Scan(&t.ID, &t.CreatedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Key already used: replay the original instead of moving money again.
@@ -121,8 +142,17 @@ func (b *Bank) Transfer(ctx context.Context, req TransferRequest) (t Transfer, r
 
 		// Step 3: check the balance. Safe because we hold the lock: nobody else
 		// can change this balance until we commit or roll back.
+		//
+		// On failure, record the rejection and COMMIT (return nil) rather than
+		// rolling back, so the key now permanently maps to this outcome. No
+		// money has moved yet, so there is nothing to undo.
 		if balances[req.FromAccountID] < req.AmountCents {
-			return ErrInsufficientFunds
+			t.Status, t.FailureReason = StatusRejected, reasonInsufficientFunds
+			_, err := tx.Exec(ctx,
+				`UPDATE transfers SET status = $1, failure_reason = $2 WHERE id = $3`,
+				t.Status, t.FailureReason, t.ID,
+			)
+			return err
 		}
 
 		// Step 4: move the money and record it. If any statement fails (e.g.
@@ -150,7 +180,21 @@ func (b *Bank) Transfer(ctx context.Context, req TransferRequest) (t Transfer, r
 	if err != nil {
 		return Transfer{}, false, fmt.Errorf("transfer: %w", err)
 	}
+	if t.Status == StatusRejected {
+		return t, replayed, rejectionError(t.FailureReason)
+	}
 	return t, replayed, nil
+}
+
+// rejectionError maps a stored failure_reason back to the error the original
+// request returned, so a replay fails the same way.
+func rejectionError(reason string) error {
+	switch reason {
+	case reasonInsufficientFunds:
+		return fmt.Errorf("transfer: %w", ErrInsufficientFunds)
+	default:
+		return fmt.Errorf("transfer: rejected (%s)", reason)
+	}
 }
 
 func validateTransfer(req TransferRequest) error {
@@ -169,9 +213,11 @@ func validateTransfer(req TransferRequest) error {
 func transferByKey(ctx context.Context, tx pgx.Tx, key string) (Transfer, error) {
 	var t Transfer
 	err := tx.QueryRow(ctx,
-		`SELECT id, idempotency_key, from_account_id, to_account_id, amount_cents, created_at
+		`SELECT id, idempotency_key, from_account_id, to_account_id, amount_cents,
+		        status, COALESCE(failure_reason, ''), created_at
 		 FROM transfers WHERE idempotency_key = $1`, key,
-	).Scan(&t.ID, &t.IdempotencyKey, &t.FromAccountID, &t.ToAccountID, &t.AmountCents, &t.CreatedAt)
+	).Scan(&t.ID, &t.IdempotencyKey, &t.FromAccountID, &t.ToAccountID, &t.AmountCents,
+		&t.Status, &t.FailureReason, &t.CreatedAt)
 	return t, err
 }
 
