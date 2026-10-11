@@ -1,3 +1,27 @@
+
+This is my first time writing a buildlog and i realized that it may be too long so ill leave a quick summary at the very top.
+
+Summary
+
+What I set out to do: build a small Go and Postgres service where accounts hold balances and money moves between them (open account, transfer, balance, history) behind a thin JSON API. Correctness came first. The goal was to prove the four rules with tests against a real Postgres database, no mocks, since mocks can't test locks or transactions.
+
+Where AI helped: fast scaffolding (schema, exact money parsing, a real-database test harness) exhaustive test cases I wouldn't be able to have written by hand and most usefully proving claims instead of asserting them. It reproduced the float bug, reproduced a deadlock against real Postgres, and broke the code on purpose to show the tests catch it. I also used a second Claude chat as a reviewer of the first one's work.
+
+Where it was confidently wrong:
+    1. The locking design in my plan deadlocked. The plan, drafted with AI, said SELECT ... FOR UPDATE. Two competing transfers on real Postgres gave deadlock detected, because the foreign-key check takes a lock that FOR UPDATE conflicts with. FOR NO KEY UPDATE fixed it.
+    2. Tests that look right but prove little. With Go's default pool of about 4 database connections, a "20 concurrent transfers" test mostly runs in a queue. And the database's CHECK (balance >= 0) would let a test pass even with the lock removed. The tests now use 50 connections and require clean "insufficient funds" errors. Removing the lock makes them fail; removing the lock and the CHECK lets all 20 transfers overdraw a $100 account.
+    3. Dangerous defaults. The test helper would drop the schema of any database it was pointed at, including my dev one. And allowing $0 opening balances, combined with Go silently ignoring unknown JSON fields, meant a typo like opening_balnce would quietly open an empty account. Both are fixed.
+
+What I rejected:
+     - Not recording failed transfers. That followed my own plan, but a stale retry could then succeed after money arrived and move money the user was told had failed. Rejections are now recorded, and retries replay the original outcome. I temporarily restored the old behaviour to confirm the new test catches it.
+     - The AI committing on its own. It made my first three commits within about 2 minutes. I stopped it and made the rest myself.
+     - Loosening the money type so a test would pass. I kept it strict (no negative input) and fixed the test instead.
+    
+What I'm not comfortable shipping: no authentication, so anyone who can reach the API can move anyone's money. Idempotency keys never expire and aren't scoped per client. A tranfer that overflows the maximum balance is rolledback rather than recorded as rejected. The demo's concurrent step has no strict barrier, so the Go tests are the real proof. History has no pagination. The race detector only runs inside Docker on my machine.
+
+
+--------------------------------------------
+
 1. First prompt I wanted claude to generate me a rough scaffolding of the project. Including having the tables for the Postgres database covering, accounts, transfers and history. This was drafted from my intial plan in another chat.
 
 what it did:
@@ -76,6 +100,6 @@ When testing this, the reports show that retry: replayed=false err=<nil> meaning
 
 I asked claude to create a json api for the bank code as well as a small demo showing simple transfers failing etc. 
 
-it built four enpoints (open account, get balance, get history, transfer). Insufficinet funds returns 422, with the rejected transfer in the body. History shows the transfer of who the money came from or went to. It also created a situation which tests most cases however it did not cover the most important one of what happens when mutiple request happen at once and competeing for the same money at the same time so I had claude add onto the tests to include that.
+it built four enpoints (open account, get balance, get history, transfer). Insufficinet funds returns 422, with the rejected transfer in the body. History shows the transfer of who the money came from or went to. It also created a situation which tests most cases however the demo's concurrent step isn't a strict proof (no barrier), so I had Claude add the real Go concurrency test as the demo's final step.
 
-When looking through the code I saw a recorded number for the INTMAX which was around 92 quadrillion, unless someone reaches that number and then overflows, there should be no errors and seeing how the richest man alive has "only" 1 trillion, it is safe to assume no problems.
+While reading the code I noticed the maximum balance is about $92 quadrillion. A transfer that would push a balance past that is rolled back with a clean 422 error, and the all-or-nothing test (rule 2) uses exactly this case to prove a failure mid-transfer undoes the debit. The one gap is that it isn't recorded as rejected the way insufficient funds is (fast addition).
