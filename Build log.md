@@ -1,4 +1,3 @@
-
 This is my first time writing a buildlog and i realized that it may be too long so ill leave a quick summary at the very top.
 
 Summary
@@ -93,7 +92,7 @@ Cons
 - There's no record of rejected attempts. Reaor auditing and fraud checks.
 ---------------------------------------------------
 
-When testing this, the reports show that retry: replayed=false err=<nil> meaning the retry succeeded and moved the money despite the transfer "failing". The new implmenetation spends a rejected key for good. Then to try again, the client must send a new key. A cost of having this may be the table filling up with failed transfers making rows that wouldnt normally exist. (storage cost).
+When testing this, the old code reports show that retry: replayed=false err=<nil> meaning the retry succeeded and moved the money despite the transfer "failing". The new implmenetation spends a rejected key for good. Then to try again, the client must send a new key. A cost of having this may be the table filling up with failed transfers making rows that wouldnt normally exist. (storage cost).
 
 
 3. HTTP API and demo
@@ -103,3 +102,14 @@ I asked claude to create a json api for the bank code as well as a small demo sh
 it built four enpoints (open account, get balance, get history, transfer). Insufficinet funds returns 422, with the rejected transfer in the body. History shows the transfer of who the money came from or went to. It also created a situation which tests most cases however the demo's concurrent step isn't a strict proof (no barrier), so I had Claude add the real Go concurrency test as the demo's final step.
 
 While reading the code I noticed the maximum balance is about $92 quadrillion. A transfer that would push a balance past that is rolled back with a clean 422 error, and the all-or-nothing test (rule 2) uses exactly this case to prove a failure mid-transfer undoes the debit. The one gap is that it isn't recorded as rejected the way insufficient funds is (fast addition).
+
+4. Review and additions (most work is done before this part, final hour changes)
+
+ I had a second Claude chat review the whole repo, then decided what to act on myself. Not all of its review was right. It claimed I wrote the stale-retry test before the fix, which isn't what happened.
+
+
+ What it found that was real:
+
+  - An idempotency key that isn't valid UTF-8 returned a 500. Postgres rejects those bytes, so the request crashed at the database instead of being rejected as bad input. It's now a 400. I confirmed the old code really returned a 500 before fixing it.
+  - A trap for the live change. Docker only applies migrations when the database is first created, but the tests rebuild the schema on every run. So a new migration passes all the tests while the running server is missing it. I hit this myself when adding the ledger trigger, and found that the suggested fix command (psql < file) doesn't work in PowerShell. The README now has the commands for both shells.
+   - The IETF Idempotency-Key draft recommends 422 for a reused key, and I use 409. I kept 409 so it's distinguishable from insufficient funds (also 422), and documented the choice.
