@@ -1,6 +1,6 @@
 This is my first time writing a buildlog and i realized that it may be too long so ill leave a quick summary at the very top.
 
-Summary
+Summary (Time spent ~ 3 hours + some inital planning)
 
 What I set out to do: build a small Go and Postgres service where accounts hold balances and money moves between them (open account, transfer, balance, history) behind a thin JSON API. Correctness came first. The goal was to prove the four rules with tests against a real Postgres database, no mocks, since mocks can't test locks or transactions.
 
@@ -110,6 +110,6 @@ While reading the code I noticed the maximum balance is about $92 quadrillion. A
 
  What it found that was real:
 
-  - An idempotency key that isn't valid UTF-8 returned a 500. Postgres rejects those bytes, so the request crashed at the database instead of being rejected as bad input. It's now a 400. I confirmed the old code really returned a 500 before fixing it.
-  - A trap for the live change. Docker only applies migrations when the database is first created, but the tests rebuild the schema on every run. So a new migration passes all the tests while the running server is missing it. I hit this myself when adding the ledger trigger, and found that the suggested fix command (psql < file) doesn't work in PowerShell. The README now has the commands for both shells.
+  - An idempotency key that isn't valid UTF-8 returned a 500. Postgres rejects those bytes, so the request crashed at the database instead of being rejected as bad input. It's now a 400. Claude confirmed the old code really returned a 500 before fixing it.
+  - A trap for the live change. Docker only applies migrations when the database is first created, but the tests rebuild the schema on every run. So a new migration passes all the tests while the running server is missing it. Claude hit this when adding the ledger trigger, and found that the suggested fix command (psql < file) doesn't work in PowerShell. The README now has the commands for both shells.
    - The IETF Idempotency-Key draft recommends 422 for a reused key, and I use 409. I kept 409 so it's distinguishable from insufficient funds (also 422), and documented the choice.
