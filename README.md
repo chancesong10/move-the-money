@@ -204,13 +204,14 @@ migrations/          schema, plain SQL
 scripts/demo.sh      step-by-step API demo
 ```
 
-## What I chose not to build
+## What I chose not to build 
+(adding most of these would be a quick change but testing them for correctness takes longer and I decided for the current scope of the assigment, as well as the 4 hour limit, I would leave these for future implementations.)
 
 - **Authentication / authorisation**: anyone who can reach the API can move anyone's money.
 - **Multiple currencies**: amounts assume two decimal places.
 - **Deposits, withdrawals, closing accounts**: money only enters at account opening.
 - **Interest, fees, splitting**: anything that divides money needs explicit rounding rules.
-- **Pagination** on history.
+- **Pagination** on history: it returns every entry.
 - **Idempotency key expiry or per-client scoping**: keys are global and kept forever.
 - **A migration tool**: Postgres applies `migrations/` on first start only.
 - **Deployment, metrics, tracing.**
@@ -220,5 +221,5 @@ scripts/demo.sh      step-by-step API demo
 1. **A migration runner** that applies new files on server start (tracking applied versions in a table), removing the migrations gotcha above.
 2. **Record every rejected attempt the same way**: balance overflow and unknown accounts currently aren't recorded, which leaves the retry gap described above.
 3. **Scope idempotency keys per client and expire them**, which needs authentication first.
-4. **Paginate history** (cursor on ledger entry ID).
+4. **Paginate history** (`?after=<entry id>&limit=50`, using the existing `(account_id, id)` index).
 5. **Authentication**, with accounts owned by users.
