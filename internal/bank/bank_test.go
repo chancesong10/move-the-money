@@ -116,7 +116,9 @@ func TestOpenAccountRejectsNegativeBalance(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidAmount", err)
 	}
 	var n int
-	testPool.QueryRow(context.Background(), `SELECT count(*) FROM accounts`).Scan(&n)
+	if err := testPool.QueryRow(context.Background(), `SELECT count(*) FROM accounts`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
 	if n != 0 {
 		t.Errorf("%d accounts created, want 0", n)
 	}

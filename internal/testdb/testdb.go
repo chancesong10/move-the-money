@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,16 @@ func Setup(ctx context.Context) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse TEST_DATABASE_URL: %w", err)
 	}
+	// migrate() drops the whole schema. Refuse to run against anything that
+	// isn't obviously a test database, so a mistyped URL can't wipe dev data.
+	if !strings.HasSuffix(cfg.ConnConfig.Database, "_test") {
+		return nil, fmt.Errorf("refusing to use database %q: test database names must end in _test", cfg.ConnConfig.Database)
+	}
+	// The default pool size is max(4, number of CPUs). If a concurrency test
+	// starts 20 goroutines but only 4 can get a connection, the rest queue in
+	// Go instead of competing inside Postgres, and the test proves much less
+	// than it appears to. Give every goroutine its own connection.
+	cfg.MaxConns = 50
 	if err := createDatabase(ctx, cfg.ConnConfig); err != nil {
 		return nil, err
 	}
